@@ -14,9 +14,9 @@ import (
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/camilb/ec2cluster"
 	"github.com/coreos/go-etcd/etcd"
 	"github.com/crewjam/awsregion"
-	"github.com/crewjam/ec2cluster"
 )
 
 type etcdState struct {
@@ -64,13 +64,13 @@ func buildCluster(s *ec2cluster.Cluster) (initialClusterState string, initialClu
 	initialClusterState = "new"
 	initialCluster = []string{}
 	for _, instance := range clusterInstances {
-		if instance.PrivateIpAddress == nil {
+		if instance.PrivateDnsName == nil {
 			continue
 		}
 
 		// add this instance to the initialCluster expression
-		initialCluster = append(initialCluster, fmt.Sprintf("%s=http://%s:2380",
-			*instance.InstanceId, *instance.PrivateIpAddress))
+		initialCluster = append(initialCluster, fmt.Sprintf("%s=https://%s:2380",
+			*instance.InstanceId, *instance.PrivateDnsName))
 
 		// skip the local node, since we know it is not running yet
 		if *instance.InstanceId == *localInstance.InstanceId {
@@ -78,27 +78,27 @@ func buildCluster(s *ec2cluster.Cluster) (initialClusterState string, initialClu
 		}
 
 		// fetch the state of the node.
-		resp, err := http.Get(fmt.Sprintf("http://%s:2379/v2/stats/self", *instance.PrivateIpAddress))
+		resp, err := http.Get(fmt.Sprintf("https://%s:2379/v2/stats/self", *instance.PrivateDnsName))
 		if err != nil {
-			log.Printf("%s: http://%s:2379/v2/stats/self: %s", *instance.InstanceId,
-				*instance.PrivateIpAddress, err)
+			log.Printf("%s: https://%s:2379/v2/stats/self: %s", *instance.InstanceId,
+				*instance.PrivateDnsName, err)
 			continue
 		}
 		nodeState := etcdState{}
 		if err := json.NewDecoder(resp.Body).Decode(&nodeState); err != nil {
-			log.Printf("%s: http://%s:2379/v2/stats/self: %s", *instance.InstanceId,
-				*instance.PrivateIpAddress, err)
+			log.Printf("%s: https://%s:2379/v2/stats/self: %s", *instance.InstanceId,
+				*instance.PrivateDnsName, err)
 			continue
 		}
 
 		if nodeState.LeaderInfo.Leader == "" {
-			log.Printf("%s: http://%s:2379/v2/stats/self: alive, no leader", *instance.InstanceId,
-				*instance.PrivateIpAddress)
+			log.Printf("%s: https://%s:2379/v2/stats/self: alive, no leader", *instance.InstanceId,
+				*instance.PrivateDnsName)
 			continue
 		}
 
-		log.Printf("%s: http://%s:2379/v2/stats/self: has leader %s", *instance.InstanceId,
-			*instance.PrivateIpAddress, nodeState.LeaderInfo.Leader)
+		log.Printf("%s: https://%s:2379/v2/stats/self: has leader %s", *instance.InstanceId,
+			*instance.PrivateDnsName, nodeState.LeaderInfo.Leader)
 		if initialClusterState != "existing" {
 			initialClusterState = "existing"
 
@@ -107,10 +107,10 @@ func buildCluster(s *ec2cluster.Cluster) (initialClusterState string, initialClu
 			log.Printf("joining cluster via %s", *instance.InstanceId)
 			m := etcdMember{
 				Name:     *localInstance.InstanceId,
-				PeerURLs: []string{fmt.Sprintf("http://%s:2380", *localInstance.PrivateIpAddress)},
+				PeerURLs: []string{fmt.Sprintf("https://%s:2380", *localInstance.PrivateDnsName)},
 			}
 			body, _ := json.Marshal(m)
-			http.Post(fmt.Sprintf("http://%s:2379/v2/members", *instance.PrivateIpAddress),
+			http.Post(fmt.Sprintf("https://%s:2379/v2/members", *instance.PrivateDnsName),
 				"application/json", bytes.NewReader(body))
 		}
 	}
@@ -194,8 +194,8 @@ func main() {
 	go func() {
 		// wait for etcd to start
 		for {
-			etcdClient := etcd.NewClient([]string{fmt.Sprintf("http://%s:2379",
-				*localInstance.PrivateIpAddress)})
+			etcdClient := etcd.NewClient([]string{fmt.Sprintf("https://%s:2379",
+				*localInstance.PrivateDnsName)})
 			if success := etcdClient.SyncCluster(); success {
 				break
 			}
@@ -223,14 +223,23 @@ func main() {
 	cmd.Stderr = os.Stderr
 	cmd.Env = []string{
 		fmt.Sprintf("ETCD_NAME=%s", *localInstance.InstanceId),
+		fmt.Sprintf("ETCD_PEER_TRUSTED_CA_FILE=/etc/etcd2/ssl/ca.pem"),
+		fmt.Sprintf("ETCD_PEER_CERT_FILE=/etc/etcd2/ssl/etcd.pem"),
+		fmt.Sprintf("ETCD_PEER_KEY_FILE=/etc/etcd2/ssl/etcd-key.pem"),
+		fmt.Sprintf("ETCD_CLIENT_CERT_AUTH=true"),
+		fmt.Sprintf("ETCD_TRUSTED_CA_FILE=/etc/etcd2/ssl/ca.pem"),
+		fmt.Sprintf("ETCD_CERT_FILE=/etc/etcd2/ssl/etcd.pem"),
+		fmt.Sprintf("ETCD_KEY_FILE=/etc/etcd2/ssl/etcd-key.pem"),
 		fmt.Sprintf("ETCD_DATA_DIR=/var/lib/etcd2"),
-		fmt.Sprintf("ETCD_ELECTION_TIMEOUT=1200"),
-		fmt.Sprintf("ETCD_ADVERTISE_CLIENT_URLS=http://%s:2379", *localInstance.PrivateIpAddress),
-		fmt.Sprintf("ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379"),
-		fmt.Sprintf("ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380"),
+		fmt.Sprintf("ETCD_ELECTION_TIMEOUT=1500"),
+		fmt.Sprintf("ETCD_HEARTBEAT_INTERVAL=300"),
+		fmt.Sprintf("ETCD_ADVERTISE_CLIENT_URLS=https://%s:2379", *localInstance.PrivateDnsName),
+		fmt.Sprintf("ETCD_LISTEN_CLIENT_URLS=https://0.0.0.0:2379"),
+		fmt.Sprintf("ETCD_LISTEN_PEER_URLS=https://0.0.0.0:2380"),
 		fmt.Sprintf("ETCD_INITIAL_CLUSTER_STATE=%s", initialClusterState),
 		fmt.Sprintf("ETCD_INITIAL_CLUSTER=%s", strings.Join(initialCluster, ",")),
-		fmt.Sprintf("ETCD_INITIAL_ADVERTISE_PEER_URLS=http://%s:2380", *localInstance.PrivateIpAddress),
+		fmt.Sprintf("ETCD_INITIAL_ADVERTISE_PEER_URLS=https://%s:2380", *localInstance.PrivateDnsName),
+		fmt.Sprintf("ETCD_DEBUG=true"),
 	}
 	asg, _ := s.AutoscalingGroup()
 	if asg != nil {

@@ -8,7 +8,7 @@ import (
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/crewjam/ec2cluster"
+	"github.com/camilb/ec2cluster"
 )
 
 // handleLifecycleEvent is invoked whenever we get a lifecycle terminate message. It removes
@@ -52,7 +52,7 @@ func handleLifecycleEvent(m *ec2cluster.LifecycleMessage) (shouldContinue bool, 
 }
 
 func watchLifecycleEvents(s *ec2cluster.Cluster, localInstance *ec2.Instance) {
-	etcdLocalURL = fmt.Sprintf("http://%s:2379", *localInstance.PrivateIpAddress)
+	etcdLocalURL = fmt.Sprintf("http://%s:2379", *localInstance.PrivateDnsName)
 	for {
 		err := s.WatchLifecycleEvents(handleLifecycleEvent)
 

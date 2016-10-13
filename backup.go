@@ -15,8 +15,8 @@ import (
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
+	"github.com/camilb/ec2cluster"
 	"github.com/coreos/go-etcd/etcd"
-	"github.com/crewjam/ec2cluster"
 )
 
 // backupService invokes backupOnce() periodically if the current node is the cluster leader.
@@ -30,23 +30,23 @@ func backupService(s *ec2cluster.Cluster, backupBucket, backupKey, dataDir strin
 	for {
 		<-ticker
 
-		resp, err := http.Get(fmt.Sprintf("http://%s:2379/v2/stats/self", *instance.PrivateIpAddress))
+		resp, err := http.Get(fmt.Sprintf("https://%s:2379/v2/stats/self", *instance.PrivateDnsName))
 		if err != nil {
-			return fmt.Errorf("%s: http://%s:2379/v2/stats/self: %s", *instance.InstanceId,
-				*instance.PrivateIpAddress, err)
+			return fmt.Errorf("%s: https://%s:2379/v2/stats/self: %s", *instance.InstanceId,
+				*instance.PrivateDnsName, err)
 		}
 
 		nodeState := etcdState{}
 		if err := json.NewDecoder(resp.Body).Decode(&nodeState); err != nil {
-			return fmt.Errorf("%s: http://%s:2379/v2/stats/self: %s", *instance.InstanceId,
-				*instance.PrivateIpAddress, err)
+			return fmt.Errorf("%s: https://%s:2379/v2/stats/self: %s", *instance.InstanceId,
+				*instance.PrivateDnsName, err)
 		}
 
 		// if the cluster has a leader other than the current node, then don't do the
 		// backup.
 		if nodeState.LeaderInfo.Leader != "" && nodeState.ID != nodeState.LeaderInfo.Leader {
-			log.Printf("backup: %s: http://%s:2379/v2/stats/self: not the leader", *instance.InstanceId,
-				*instance.PrivateIpAddress)
+			log.Printf("backup: %s: https://%s:2379/v2/stats/self: not the leader", *instance.InstanceId,
+				*instance.PrivateDnsName)
 			<-ticker
 			continue
 		}
@@ -114,7 +114,7 @@ func backupOnce(s *ec2cluster.Cluster, backupBucket, backupKey, dataDir string) 
 	if err != nil {
 		return err
 	}
-	etcdClient := etcd.NewClient([]string{fmt.Sprintf("http://%s:2379", *instance.PrivateIpAddress)})
+	etcdClient := etcd.NewClient([]string{fmt.Sprintf("https://%s:2379", *instance.PrivateDnsName)})
 	if success := etcdClient.SyncCluster(); !success {
 		return fmt.Errorf("backupOnce: cannot sync machines")
 	}
@@ -218,7 +218,7 @@ func restoreBackup(s *ec2cluster.Cluster, backupBucket, backupKey, dataDir strin
 	if err != nil {
 		return err
 	}
-	etcdClient := etcd.NewClient([]string{fmt.Sprintf("http://%s:2379", *instance.PrivateIpAddress)})
+	etcdClient := etcd.NewClient([]string{fmt.Sprintf("https://%s:2379", *instance.PrivateDnsName)})
 	if success := etcdClient.SyncCluster(); !success {
 		return fmt.Errorf("restore: cannot sync machines")
 	}
