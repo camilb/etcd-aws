@@ -2,9 +2,13 @@ package main
 
 import (
 	"compress/gzip"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net/http"
 	"time"
 
@@ -19,8 +23,44 @@ import (
 	"github.com/coreos/go-etcd/etcd"
 )
 
+const (
+	etcdcaCert = "/etc/etcd2/ssl/ca.pem"
+	etcdKey    = "/etc/etcd2/ssl/etcd-key.pem"
+	etcdCert   = "/etc/etcd2/ssl/etcd.pem"
+)
+
+var (
+	certFile = flag.String("cert", "/etc/etcd2/ssl/etcd.pem", "A PEM eoncoded certificate file.")
+	keyFile  = flag.String("key", "/etc/etcd2/ssl/etcd-key.pem", "A PEM encoded private key file.")
+	caFile   = flag.String("CA", "/etc/etcd2/ssl/ca.pem", "A PEM eoncoded CA's certificate file.")
+)
+
 // backupService invokes backupOnce() periodically if the current node is the cluster leader.
 func backupService(s *ec2cluster.Cluster, backupBucket, backupKey, dataDir string, interval time.Duration) error {
+	flag.Parse()
+
+	// Load client cert
+	cert, err := tls.LoadX509KeyPair(*certFile, *keyFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Load CA cert
+	caCert, err := ioutil.ReadFile(*caFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+	caCertPool := x509.NewCertPool()
+	caCertPool.AppendCertsFromPEM(caCert)
+
+	// Setup HTTPS client
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		RootCAs:      caCertPool,
+	}
+	tlsConfig.BuildNameToCertificate()
+	transport := &http.Transport{TLSClientConfig: tlsConfig}
+	client := &http.Client{Transport: transport}
 	instance, err := s.Instance()
 	if err != nil {
 		return err
@@ -30,7 +70,7 @@ func backupService(s *ec2cluster.Cluster, backupBucket, backupKey, dataDir strin
 	for {
 		<-ticker
 
-		resp, err := http.Get(fmt.Sprintf("https://%s:2379/v2/stats/self", *instance.PrivateDnsName))
+		resp, err := client.Get(fmt.Sprintf("https://%s:2379/v2/stats/self", *instance.PrivateDnsName))
 		if err != nil {
 			return fmt.Errorf("%s: https://%s:2379/v2/stats/self: %s", *instance.InstanceId,
 				*instance.PrivateDnsName, err)
@@ -114,7 +154,7 @@ func backupOnce(s *ec2cluster.Cluster, backupBucket, backupKey, dataDir string) 
 	if err != nil {
 		return err
 	}
-	etcdClient := etcd.NewClient([]string{fmt.Sprintf("https://%s:2379", *instance.PrivateDnsName)})
+	etcdClient, err := etcd.NewTLSClient([]string{fmt.Sprintf("https://%s:2379", *instance.PrivateDnsName)}, etcdCert, etcdKey, etcdcaCert)
 	if success := etcdClient.SyncCluster(); !success {
 		return fmt.Errorf("backupOnce: cannot sync machines")
 	}
@@ -218,7 +258,7 @@ func restoreBackup(s *ec2cluster.Cluster, backupBucket, backupKey, dataDir strin
 	if err != nil {
 		return err
 	}
-	etcdClient := etcd.NewClient([]string{fmt.Sprintf("https://%s:2379", *instance.PrivateDnsName)})
+	etcdClient, err := etcd.NewTLSClient([]string{fmt.Sprintf("https://%s:2379", *instance.PrivateDnsName)}, etcdCert, etcdKey, etcdcaCert)
 	if success := etcdClient.SyncCluster(); !success {
 		return fmt.Errorf("restore: cannot sync machines")
 	}
