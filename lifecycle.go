@@ -1,8 +1,11 @@
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"time"
 
@@ -17,9 +20,31 @@ func handleLifecycleEvent(m *ec2cluster.LifecycleMessage) (shouldContinue bool, 
 	if m.LifecycleTransition != "autoscaling:EC2_INSTANCE_TERMINATING" {
 		return true, nil
 	}
+	// Load client cert
+	cert, err := tls.LoadX509KeyPair(*certFile, *keyFile)
+	if err != nil {
+		log.Debug(err)
+	}
+
+	// Load CA cert
+	caCert, err := ioutil.ReadFile(*caFile)
+	if err != nil {
+		log.Debug(err)
+	}
+	caCertPool := x509.NewCertPool()
+	caCertPool.AppendCertsFromPEM(caCert)
+
+	// Setup HTTPS client
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		RootCAs:      caCertPool,
+	}
+	tlsConfig.BuildNameToCertificate()
+	transport := &http.Transport{TLSClientConfig: tlsConfig}
+	client := &http.Client{Transport: transport}
 
 	// look for the instance in the cluster
-	resp, err := http.Get(fmt.Sprintf("%s/v2/members", etcdLocalURL))
+	resp, err := client.Get(fmt.Sprintf("%s/v2/members", etcdLocalURL))
 	if err != nil {
 		return false, err
 	}
@@ -43,7 +68,7 @@ func handleLifecycleEvent(m *ec2cluster.LifecycleMessage) (shouldContinue bool, 
 		"InstanceID": m.EC2InstanceID,
 		"MemberID":   memberID}).Info("removing from cluster")
 	req, _ := http.NewRequest("DELETE", fmt.Sprintf("%s/v2/members/%s", etcdLocalURL, memberID), nil)
-	_, err = http.DefaultClient.Do(req)
+	_, err = client.Do(req)
 	if err != nil {
 		return false, err
 	}
@@ -52,7 +77,7 @@ func handleLifecycleEvent(m *ec2cluster.LifecycleMessage) (shouldContinue bool, 
 }
 
 func watchLifecycleEvents(s *ec2cluster.Cluster, localInstance *ec2.Instance) {
-	etcdLocalURL = fmt.Sprintf("http://%s:2379", *localInstance.PrivateDnsName)
+	etcdLocalURL = fmt.Sprintf("https://%s:2379", *localInstance.PrivateDnsName)
 	for {
 		err := s.WatchLifecycleEvents(handleLifecycleEvent)
 

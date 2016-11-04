@@ -2,9 +2,12 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"os"
 	"os/exec"
@@ -50,6 +53,12 @@ type etcdMember struct {
 
 var etcdLocalURL string
 
+var (
+	certFile = flag.String("cert", "/etc/etcd2/ssl/etcd-client.pem", "A PEM eoncoded certificate file.")
+	keyFile  = flag.String("key", "/etc/etcd2/ssl/etcd-client-key.pem", "A PEM encoded private key file.")
+	caFile   = flag.String("CA", "/etc/etcd2/ssl/ca.pem", "A PEM eoncoded CA's certificate file.")
+)
+
 func buildCluster(s *ec2cluster.Cluster) (initialClusterState string, initialCluster []string, err error) {
 	localInstance, err := s.Instance()
 	if err != nil {
@@ -76,9 +85,36 @@ func buildCluster(s *ec2cluster.Cluster) (initialClusterState string, initialClu
 		if *instance.InstanceId == *localInstance.InstanceId {
 			continue
 		}
+		instance, err := s.Instance()
+		if err != nil {
+			log.Debug(err)
+			return "", nil, err
+		}
 
+		// Load client cert
+		cert, err := tls.LoadX509KeyPair(*certFile, *keyFile)
+		if err != nil {
+			log.Debug(err)
+		}
+
+		// Load CA cert
+		caCert, err := ioutil.ReadFile(*caFile)
+		if err != nil {
+			log.Debug(err)
+		}
+		caCertPool := x509.NewCertPool()
+		caCertPool.AppendCertsFromPEM(caCert)
+
+		// Setup HTTPS client
+		tlsConfig := &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			RootCAs:      caCertPool,
+		}
+		tlsConfig.BuildNameToCertificate()
+		transport := &http.Transport{TLSClientConfig: tlsConfig}
+		client := &http.Client{Transport: transport}
 		// fetch the state of the node.
-		resp, err := http.Get(fmt.Sprintf("https://%s:2379/v2/stats/self", *instance.PrivateDnsName))
+		resp, err := client.Get(fmt.Sprintf("https://%s:2379/v2/stats/self", *instance.PrivateDnsName))
 		if err != nil {
 			log.Printf("%s: https://%s:2379/v2/stats/self: %s", *instance.InstanceId,
 				*instance.PrivateDnsName, err)
@@ -96,7 +132,7 @@ func buildCluster(s *ec2cluster.Cluster) (initialClusterState string, initialClu
 				*instance.PrivateDnsName)
 			continue
 		}
-
+		log.Printf("Sarmizegetusa")
 		log.Printf("%s: https://%s:2379/v2/stats/self: has leader %s", *instance.InstanceId,
 			*instance.PrivateDnsName, nodeState.LeaderInfo.Leader)
 		if initialClusterState != "existing" {
@@ -110,7 +146,7 @@ func buildCluster(s *ec2cluster.Cluster) (initialClusterState string, initialClu
 				PeerURLs: []string{fmt.Sprintf("https://%s:2380", *localInstance.PrivateDnsName)},
 			}
 			body, _ := json.Marshal(m)
-			http.Post(fmt.Sprintf("https://%s:2379/v2/members", *instance.PrivateDnsName),
+			client.Post(fmt.Sprintf("https://%s:2379/v2/members", *instance.PrivateDnsName),
 				"application/json", bytes.NewReader(body))
 		}
 	}
@@ -123,12 +159,12 @@ func main() {
 	clusterTagName := flag.String("tag", "aws:autoscaling:groupName",
 		"The instance tag that is common to all members of the cluster")
 
-	defaultBackupInterval := 5 * time.Minute
+	defaultBackupInterval := 1 * time.Minute
 	if d := os.Getenv("ETCD_BACKUP_INTERVAL"); d != "" {
 		var err error
 		defaultBackupInterval, err = time.ParseDuration(d)
 		if err != nil {
-			log.Fatalf("ERROR: %s", err)
+			log.Printf("ERROR: %s", err)
 		}
 	}
 
@@ -158,7 +194,7 @@ func main() {
 	if *instanceID == "" {
 		*instanceID, err = ec2cluster.DiscoverInstanceID()
 		if err != nil {
-			log.Fatalf("ERROR: %s", err)
+			log.Printf("ERROR: %s", err)
 		}
 	}
 
@@ -176,7 +212,7 @@ func main() {
 
 	localInstance, err := s.Instance()
 	if err != nil {
-		log.Fatalf("ERROR: %s", err)
+		log.Printf("ERROR: %s", err)
 	}
 
 	initialClusterState, initialCluster, err := buildCluster(s)
@@ -194,8 +230,10 @@ func main() {
 	go func() {
 		// wait for etcd to start
 		for {
-			etcdClient := etcd.NewClient([]string{fmt.Sprintf("https://%s:2379",
-				*localInstance.PrivateDnsName)})
+			etcdClient, err := etcd.NewTLSClient([]string{fmt.Sprintf("https://%s:2379", *localInstance.PrivateDnsName)}, etcdCert, etcdKey, etcdcaCert)
+			if err != nil {
+				log.Printf("ERROR: %s", err)
+			}
 			if success := etcdClient.SyncCluster(); success {
 				break
 			}
@@ -204,12 +242,12 @@ func main() {
 
 		if shouldTryRestore {
 			if err := restoreBackup(s, *backupBucket, *backupKey, *dataDir); err != nil {
-				log.Fatalf("ERROR: %s", err)
+				log.Printf("ERROR: %s", err)
 			}
 		}
 
 		if err := backupService(s, *backupBucket, *backupKey, *dataDir, *backupInterval); err != nil {
-			log.Fatalf("ERROR: %s", err)
+			log.Printf("ERROR: %s", err)
 		}
 	}()
 
@@ -218,7 +256,7 @@ func main() {
 	go watchLifecycleEvents(s, localInstance)
 
 	// Run the etcd command
-	cmd := exec.Command("etcd")
+	cmd := exec.Command("etcd2")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = []string{
@@ -239,7 +277,7 @@ func main() {
 		fmt.Sprintf("ETCD_INITIAL_CLUSTER_STATE=%s", initialClusterState),
 		fmt.Sprintf("ETCD_INITIAL_CLUSTER=%s", strings.Join(initialCluster, ",")),
 		fmt.Sprintf("ETCD_INITIAL_ADVERTISE_PEER_URLS=https://%s:2380", *localInstance.PrivateDnsName),
-		fmt.Sprintf("ETCD_DEBUG=true"),
+		fmt.Sprintf("ETCD_DEBUG=false"),
 	}
 	asg, _ := s.AutoscalingGroup()
 	if asg != nil {
@@ -249,6 +287,6 @@ func main() {
 		log.Printf("%s", env)
 	}
 	if err := cmd.Run(); err != nil {
-		log.Fatalf("%s", err)
+		log.Printf("%s", err)
 	}
 }

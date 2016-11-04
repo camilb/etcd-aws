@@ -25,20 +25,14 @@ import (
 
 const (
 	etcdcaCert = "/etc/etcd2/ssl/ca.pem"
-	etcdKey    = "/etc/etcd2/ssl/etcd-key.pem"
-	etcdCert   = "/etc/etcd2/ssl/etcd.pem"
-)
-
-var (
-	certFile = flag.String("cert", "/etc/etcd2/ssl/etcd.pem", "A PEM eoncoded certificate file.")
-	keyFile  = flag.String("key", "/etc/etcd2/ssl/etcd-key.pem", "A PEM encoded private key file.")
-	caFile   = flag.String("CA", "/etc/etcd2/ssl/ca.pem", "A PEM eoncoded CA's certificate file.")
+	etcdKey    = "/etc/etcd2/ssl/etcd-client-key.pem"
+	etcdCert   = "/etc/etcd2/ssl/etcd-client.pem"
 )
 
 // backupService invokes backupOnce() periodically if the current node is the cluster leader.
 func backupService(s *ec2cluster.Cluster, backupBucket, backupKey, dataDir string, interval time.Duration) error {
 	flag.Parse()
-
+	log.Debug("Starting backup to S3")
 	// Load client cert
 	cert, err := tls.LoadX509KeyPair(*certFile, *keyFile)
 	if err != nil {
@@ -63,6 +57,7 @@ func backupService(s *ec2cluster.Cluster, backupBucket, backupKey, dataDir strin
 	client := &http.Client{Transport: transport}
 	instance, err := s.Instance()
 	if err != nil {
+		log.Fatal(err)
 		return err
 	}
 
@@ -155,6 +150,9 @@ func backupOnce(s *ec2cluster.Cluster, backupBucket, backupKey, dataDir string) 
 		return err
 	}
 	etcdClient, err := etcd.NewTLSClient([]string{fmt.Sprintf("https://%s:2379", *instance.PrivateDnsName)}, etcdCert, etcdKey, etcdcaCert)
+	if err != nil {
+		log.Fatalf("ERROR: %s", err)
+	}
 	if success := etcdClient.SyncCluster(); !success {
 		return fmt.Errorf("backupOnce: cannot sync machines")
 	}
